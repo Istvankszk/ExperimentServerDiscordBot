@@ -1,10 +1,17 @@
-import discord, asyncio, random, time, numpy, datetime, heapq, os
+import discord, asyncio, random, time, numpy, datetime, heapq, os, time, datetime, re
 client = discord.Client()
 
 import configparser
 config = configparser.ConfigParser()
 config.read("SigmaDiscordBot.ini")	#read config
 
+#		"Sigma-Chan" discord bot
+#		   Version: 3.1
+#		     Istvan-TECH 2017-2018
+
+version = "SigmaDiscordBot | Version: 3.1 | Istvan-TECH | 2017-2018"
+
+#Verbose
 if config['main']['verbose'] == "False":
 	verbose = False
 else:
@@ -17,8 +24,7 @@ async def on_ready():
 	else: print(" >running verbose mode")
 	
 #Role updates
-async def background_loop():
-	global server, exp_channel
+async def experiment_loop():
 	await client.wait_until_ready()
 	await asyncio.sleep(1)
 	while not client.is_closed:
@@ -72,8 +78,52 @@ async def background_loop():
 		if verbose: print(" >updating ranks complete. next update in {} hours".format(int(config['main']['update_interval'])/60/60)) 
 		await asyncio.sleep(int(config['main']['update_interval'])) #sleep
 
-client.loop.create_task(background_loop()) #start
+		
+#music channel
+async def music_loop():
+	await client.wait_until_ready()
+	await asyncio.sleep(1)
+	while not client.is_closed:
+		if verbose: print("checking music channel")
+		server = client.get_server(config['main']['server_id'])
+		mus_channel = server.get_channel(config['channels']['music_channel_id'])
+		parse_limit = int(config['main']['top_limit'])
+		
+		mus_songs = []; ended = False
+		async for log in client.logs_from(mus_channel, limit = parse_limit):
+			if "set." in log.content and log.author.id == client.user.id: #get last
+				mus_songs.append(log)
+				break
+			if "ended" in log.content:
+				ended = True
+			if "http" in log.content or log.author.id == client.user.id:
+				mus_songs.append(log)
+			
+		if "set." in mus_songs[-1].content:	
+			end_date = datetime.datetime.strptime(mus_songs[-1].content.rsplit("until ",1)[1],"%d. %b %Y, %H:%M")
+			
+			if datetime.datetime.now() < end_date: #if past
+				if verbose: print(" >date in future")
+				wait = round((end_date - datetime.datetime.now()).total_seconds())
+				if verbose: print(" >waiting for {}".format(wait))
+				await asyncio.sleep(wait + 30)
+			else:
+				if verbose: print(" >date already past")
+				if ended == False:
+					await client.unpin_message(mus_songs[-1])
+					await client.send_message(mus_channel,"the genre set on {:%d. %b %Y, %H:%M} has ended. feel free to set a new one or post any kind of music for now".format(end_date))
+					if verbose: print("sent close message, unpinned prev")
+				else:
+					if verbose: print(" >close message already sent")
+					
+		await asyncio.sleep(int(config['main']['update_interval'])/2) #sleep
+				
+				
+#start loops
+client.loop.create_task(experiment_loop()) #start
+client.loop.create_task(music_loop()) #start
 
+#main on message event
 @client.event
 async def on_message(message):
 	#main variables (id) 
@@ -83,14 +133,54 @@ async def on_message(message):
 	rl_admin = discord.utils.get(server.roles, id = config['roles']['admin_role_id'])
 	exp_channel = server.get_channel(config['channels']['experiment_channel_id'])
 	cre_channel = server.get_channel(config['channels']['creative_channel_id'])
+	mus_channel = server.get_channel(config['channels']['music_channel_id'])
+	parse_limit = int(config['main']['top_limit'])
+	
+	if message.content.startswith('!set') and message.channel == mus_channel and "genre" in message.content.lower(): #music genre start
+		if verbose: print("user [{}] started genre in [{}]".format(message.author.display_name, mus_channel.name))
+		string = message.content.replace(":","").rsplit("for",1)
+		string[0] = string[0].replace("!set genre","").strip(" ")
+		
+		mus_songs = []; ended = False; started = False
+		async for log in client.logs_from(mus_channel, limit = parse_limit):
+			if "set." in log.content and log.author.id == client.user.id: #get last
+				started = True
+				break
+			if "ended" in log.content:
+				ended = True
+		
+		if ended == True or started == False:
+			if string[1]: #use hours no matter what
+				bas = int("".join( [k for k in string[1] if k.isdigit()] ))
+				if "week" in string[1]:
+					string[1] = bas * 7 * 24
+				elif "day" in string[1]:
+					string[1] = bas * 24
+				elif "hour" in string[1]:
+					string[1] = bas
+				else:
+					if verbose: print("date format error. using default")
+					string[1] = 7 * 24
+			else: #if date is missing
+				if verbose: print("date format error. using default")
+				string.append(7 * 24)
+			
+			runtime = datetime.timedelta(hours = string[1])
+			expire = datetime.datetime.now() + runtime
+			out = "set. please post {} songs for the next {}, that is, until {:%d. %b %Y, %H:%M}".format(str(string[0]), str(runtime).split(",")[0], expire)
+			msg = await client.send_message(mus_channel,out)
+			await client.pin_message(msg)
+		else:
+			out = "I'm sorry {}, I'm afraid I can't do that. \n*(How about you check the pinned message on this channel)*".format(message.author.display_name)
+			await client.send_message(mus_channel,out)
 	
 	if message.content.startswith('!info'): #User info
-		if verbose: print("info command from {}".format(message.author.display_name))
+		if verbose: print("info command from user [{}]".format(message.author.display_name))
 		await client.send_typing(message.channel) 			#While calculating, send typing
 		global_user = server.get_member(message.author.id) 	#user as member object
 		#experiment:
 		exp_messages = []; exp_author_times = 0; exp_rank = ""; exp_user = 0; exp_total = 0; # all messages / Post number user, total
-		async for log in client.logs_from(exp_channel, limit = int(config['main']['top_limit'])): #experiment log
+		async for log in client.logs_from(exp_channel, limit = parse_limit): #experiment log
 			exp_messages.append(log.author.id)
 			if log.author == message.author:
 				exp_user += 1
@@ -98,6 +188,7 @@ async def on_message(message):
 		exp_usr, exp_cts = numpy.unique(exp_messages, return_counts=True) #user and message count
 		exp_top = ""
 		
+		end = ""
 		i = 1; k = 1
 		while (k < 4):
 			tmp = exp_usr[exp_cts.tolist().index(heapq.nlargest(i, exp_cts)[-1])] #DON'T. ASK.
@@ -114,7 +205,6 @@ async def on_message(message):
 					k += 1
 			exp_cts[exp_cts.tolist().index(heapq.nlargest(i, exp_cts)[-1])] = 99999 #STILL FIXES SHIT
 			i += 1
-			
 			
 		async for log in client.logs_from(exp_channel, after = datetime.datetime.now() - datetime.timedelta(days=int(config['main']['top_days'])+1), limit=500):
 			if log.author == message.author:
@@ -150,6 +240,11 @@ async def on_message(message):
 	elif message.content.startswith('!help'):
 		await client.send_message(message.channel, "Ranks/roles are based on your performance in the #experiment channel. The 3 people who post the most get the 'top' tole. You also get a special color for when you post an image {} days or more in a row.\n\nIn the #creative channel, every submission is worth 5 points, and every additional reaction with the 'sigma' symbol is worth 10 more points. This is not completely implemented yet".format(config['main']['top_days']))
 		
+	#version info
+	elif message.content.startswith('!version'):
+		global version
+		await client.send_message(message.channel, version)
+	
 	#Change 'playing' status. currently not in use.
 	#elif message.content.startswith('>>Change presence'):
 	#await client.change_presence(game=discord.Game(name='*GAME*'))
